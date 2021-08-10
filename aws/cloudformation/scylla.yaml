@@ -61,6 +61,25 @@ Parameters:
     Type: 'AWS::EC2::KeyPair::KeyName'
     ConstraintDescription: must be the name of an existing EC2 KeyPair.
 
+  AddFlowLog:
+    AllowedValues: [true, false]
+    Default: false
+    Description: Create FlowLog for scylla-cluster network traffic (by VPC FlowLog)
+    Type: String
+
+  FlowLogGroupRetention:
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653]
+    Default: 14
+    Description: Number of days to retain the Flow Logs in CloudWatch
+    Type: String
+
+  FlowLogTrafficType:
+    AllowedValues: [ACCEPT, ALL, REJECT]
+    Default: REJECT
+    Description: The type of traffic to log. You can log traffic that the resource accepts or rejects, or all traffic.
+    Type: String
+
+
 # Those conditions would be used to enable nodes based on InstanceCount parameter
 Conditions:
     Launch1: !Equals [1, 1]
@@ -108,6 +127,7 @@ Conditions:
       - !Not [!Equals [7, !Ref InstanceCount]]
       - !Not [!Equals [8, !Ref InstanceCount]]
     Launch10: !Equals [10, !Ref InstanceCount]
+    CreateFlowLog: !Equals [true, !Ref AddFlowLog]
 
 Resources:
   GatewayAttachment:
@@ -924,6 +944,57 @@ Resources:
         - Key: ClusterName
           Value: !Ref ClusterName
 
+  FlowLogRole:
+    Condition: CreateFlowLog
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service:
+                - vpc-flow-logs.amazonaws.com
+      Policies:
+        - PolicyName: CloudWatchLogGroup
+          PolicyDocument:
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                Resource: !GetAtt FlowLogGroup.Arn
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-FlowLogRole'
+        - Key: ClusterName
+          Value: !Ref ClusterName
+
+  FlowLogGroup:
+    Condition: CreateFlowLog
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: !Ref FlowLogGroupRetention
+
+  FlowLog:
+    Condition: CreateFlowLog
+    Type: AWS::EC2::FlowLog
+    Properties:
+      LogDestinationType: cloud-watch-logs
+      LogGroupName: !Ref FlowLogGroup
+      DeliverLogsPermissionArn: !GetAtt FlowLogRole.Arn
+      ResourceId: !Ref VPC
+      ResourceType: VPC
+      TrafficType: !Ref FlowLogTrafficType
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-FlowLog'
+        - Key: ClusterName
+          Value: !Ref ClusterName
+
 Outputs:
   Node0:
     Condition: Launch1
@@ -1115,3 +1186,8 @@ Outputs:
     Value: !Ref Subnet
   VPC:
     Value: !Ref VPC
+  FlowLog:
+    Value: !Ref FlowLog
+  FlowLogGroup:
+    Description: CloudWatch Log group where Flow Log data will be published
+    Value: !Ref FlowLogGroup
