@@ -218,7 +218,8 @@ Resources:
                 - !If [Launch3, !Select [2, !Ref ScyllaSeedIPs], !Ref "AWS::NoValue"]
             - '"}]}]'
             - !Sub ', "cluster_name": "${ScyllaClusterName}", '
-            - '"endpoint_snitch": "org.apache.cassandra.locator.Ec2Snitch"}, '
+            - '"endpoint_snitch": "org.apache.cassandra.locator.Ec2Snitch", '
+            - '"authenticator": "PasswordAuthenticator"}, '
             - '"start_scylla_on_first_boot": true, '
             - '"post_configuration_script" : "'
             - !Base64
@@ -226,6 +227,8 @@ Resources:
                 - ''
                 - - !Sub |
                     #!/bin/bash -ex
+                    export INSTANCE_ID=$(curl -sS http://169.254.169.254/latest/meta-data/instance-id)
+                    /usr/bin/cqlsh -u cassandra -p cassandra -e "ALTER USER cassandra WITH PASSWORD '$INSTANCE_ID'"
                     /usr/local/bin/cfn-signal --exit-code 0 --resource Node{{ node_index }} --region ${AWS::Region} --stack ${AWS::StackName}
             - '"}'
       NetworkInterfaces:
