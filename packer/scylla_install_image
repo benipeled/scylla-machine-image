@@ -1,0 +1,223 @@
+#!/usr/bin/python3
+# -*- coding: utf-8 -*-
+#
+# Copyright 2020 ScyllaDB
+#
+# SPDX-License-Identifier: Apache-2.0
+
+import os
+import sys
+import glob
+import re
+import shutil
+import shlex
+import tarfile
+import argparse
+import platform
+from io import StringIO
+from subprocess import run, PIPE, STDOUT
+
+my_env = os.environ.copy()
+my_env['DEBIAN_FRONTEND']='noninteractive'
+apt_keys_dir = '/etc/apt/keyrings'
+
+def get_kver(pattern):
+    for k in glob.glob(pattern):
+        return re.sub(r'^/boot/vmlinuz-(.+)$', r'\1', k)
+
+def arch():
+    return platform.machine()
+
+def deb_arch():
+    darch={'x86_64': 'amd64', 'aarch64': 'arm64'}
+    return darch[arch()]
+
+def half_of_diskfree():
+    disk = os.statvfs('/')
+    return int((disk.f_bavail * disk.f_frsize) / 2)
+
+if __name__ == '__main__':
+    if os.getuid() > 0:
+        print('Requires root permission.')
+        sys.exit(1)
+
+    homedir = os.path.abspath(os.path.join(__file__, os.pardir))
+    parser = argparse.ArgumentParser(description='Construct AMI')
+    parser.add_argument('--localdeb', action='store_true', default=False,
+                        help='deploy locally built rpms')
+    parser.add_argument('--product',
+                        help='name of the product', default='scylla')
+    parser.add_argument('--repo',
+                        help='repository for both install and update, specify .repo/.list file URL')
+    parser.add_argument('--repo-for-install',
+                        help='repository for install, specify .repo/.list file URL')
+    parser.add_argument('--repo-for-update',
+                        help='repository for update, specify .repo/.list file URL')
+    parser.add_argument('--target-cloud', choices=['aws', 'gce', 'azure'], help='specify target cloud')
+    parser.add_argument('--scylla-version',
+                        help='Scylla version to be added to manifest file')
+    args = parser.parse_args()
+
+    if args.repo:
+        args.repo_for_install = args.repo_for_update = args.repo
+
+    if not args.localdeb and not args.repo_for_install:
+        print('Error: need to specify --localdeb or --repo/--repo-for-install')
+        sys.exit(1)
+
+    run('apt-key adv --keyserver keyserver.ubuntu.com --recv-keys d0a112e067426ab2', shell=True, check=True)
+    run(f'mkdir -p {apt_keys_dir}; gpg --homedir /tmp --no-default-keyring --keyring {apt_keys_dir}/scylladb.gpg '
+        f'--keyserver hkp://keyserver.ubuntu.com:80 --recv-keys d0a112e067426ab2', shell=True, check=True)
+
+    if args.repo_for_install:
+        run(f'curl -L -o /etc/apt/sources.list.d/scylla_install.list {args.repo_for_install}', shell=True, check=True)
+    elif args.localdeb:
+        with open('/etc/apt/sources.list.d/scylla_install.list', 'w') as f:
+            f.write('deb file:/home/ubuntu ./')
+    else:
+        print('no scylla package found.')
+        sys.exit(1)
+
+    run('apt-get update --allow-insecure-repositories -y', shell=True, check=True)
+    run('apt-get full-upgrade -y', shell=True, check=True)
+    run('apt-get purge -y apport fuse', shell=True, check=True)
+    run('apt-get install -y systemd-coredump', shell=True, check=True)
+    run(f'apt-get install -y --auto-remove --allow-unauthenticated {args.product}-machine-image {args.product}-server-dbg', shell=True, check=True)
+
+    os.remove('/etc/apt/sources.list.d/scylla_install.list')
+    if args.repo_for_update:
+        run(f'curl -L -o /etc/apt/sources.list.d/scylla.list {args.repo_for_update}', shell=True, check=True)
+
+    # disable unattended-upgrades
+    run('apt-get purge -y unattended-upgrades update-notifier-common', shell=True, check=True)
+    # remove snapd
+    run('apt-get purge -y snapd', shell=True, check=True)
+    run('apt-get purge -y modemmanager', shell=True, check=True)
+    # drop packages does not needed anymore
+    run('apt-get autoremove --purge -y', shell=True, check=True)
+
+    if args.target_cloud == 'aws':
+        # use easy_install instead of pip, because easy_install requires
+        # fewer dependencies, no need to install gcc, it makes our AMI smaller.
+        # XXX: we want install dependencies from distro repo, but
+        # python-daemon-2.2 on Ubuntu 20.04 is too new for aws-cfn-bootstrap,
+        # so install python-daemon-2.1 from pypi
+        run('apt-get install -y python3-pystache python3-lockfile python3-setuptools', shell=True, check=True)
+        run('python3 -m easy_install https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-py3-latest.tar.gz', shell=True, check=True)
+
+        # install .deb version of ssm-agent since we dropped snapd version
+        run(f'curl -L -o /tmp/amazon-ssm-agent.deb https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/debian_{deb_arch()}/amazon-ssm-agent.deb', shell=True, check=True)
+        run('dpkg -i /tmp/amazon-ssm-agent.deb', shell=True, check=True)
+        run('systemctl enable amazon-ssm-agent', shell=True, check=True)
+
+        cfnpath = run('python3 -c "import cfnbootstrap as _; print(_.__path__[0])"', capture_output=True, shell=True, check=True, encoding='utf-8').stdout.strip()
+        initpath = os.path.abspath(f'{cfnpath}/../init/ubuntu/cfn-hup')
+        shutil.copyfile(initpath, '/etc/init.d/cfn-hup')
+        os.chmod('/etc/init.d/cfn-hup', 0o755)
+
+        setup_opt = '--ntp-domain amazon'
+        sysconfig_opt = ''
+    elif args.target_cloud == 'gce':
+        setup_opt = ''
+        sysconfig_opt = '--disable-writeback-cache'
+    elif args.target_cloud == 'azure':
+        setup_opt = ''
+        sysconfig_opt = '--disable-writeback-cache'
+
+    run('systemctl daemon-reload', shell=True, check=True)
+    run('systemctl enable scylla-image-setup.service', shell=True, check=True)
+    run('systemctl enable scylla-image-post-start.service', shell=True, check=True)
+    run('/opt/scylladb/scripts/scylla_setup --no-coredump-setup --no-sysconfig-setup --no-raid-setup --no-io-setup --no-bootparam-setup --no-ec2-check --no-swap-setup --no-cpuscaling-setup', shell=True, check=True)
+
+    # On Ubuntu, 'cpufrequtils' never fails even CPU scaling is not supported,
+    # so we want to enable it here
+    run('/opt/scylladb/scripts/scylla_cpuscaling_setup --force', shell=True, check=True)
+
+    run(f'/opt/scylladb/scripts/scylla_sysconfig_setup --ami --set-clocksource {sysconfig_opt}', shell=True, check=True)
+    run(f'/opt/scylladb/scripts/scylla_swap_setup --swap-size-bytes {half_of_diskfree()}', shell=True, check=True)
+    run('/opt/scylladb/scripts/scylla_coredump_setup', shell=True, check=True)
+    dot_mount = '''
+[Unit]
+Description=Save coredump to scylla data directory
+Conflicts=umount.target
+Before=scylla-server.service
+After=local-fs.target
+DefaultDependencies=no
+
+[Mount]
+What=/var/lib/scylla/coredump
+Where=/var/lib/systemd/coredump
+Type=none
+Options=bind
+
+[Install]
+WantedBy=multi-user.target
+'''[1:-1]
+    with open('/etc/systemd/system/var-lib-systemd-coredump.mount', 'w') as f:
+        f.write(dot_mount)
+    os.makedirs('/var/lib/scylla/coredump', exist_ok=True)
+
+    os.remove('{}/.ssh/authorized_keys'.format(homedir))
+    os.remove('/var/lib/scylla-housekeeping/housekeeping.uuid')
+
+    with open('/etc/default/grub.d/50-cloudimg-settings.cfg') as f:
+        grub = f.read()
+    grub = re.sub(r'^GRUB_CMDLINE_LINUX_DEFAULT="(.+)"$', r'GRUB_CMDLINE_LINUX_DEFAULT="\1 net.ifnames=0 clocksource=tsc tsc=reliable"', grub, flags=re.MULTILINE)
+    with open('/etc/default/grub.d/50-cloudimg-settings.cfg', 'w') as f:
+        f.write(grub)
+    run('update-grub2', shell=True, check=True)
+
+    profile = '/etc/skel/.profile'
+    with open(profile, 'a') as f:
+        f.write('\n\n/opt/scylladb/scylla-machine-image/scylla_login\n')
+
+    # On AWS, ssh user is statically created at AMI building time, so we need to
+    # change it to 'scyllaadm`.
+    # However, on GCE and Azure ssh user is dynamically created at instance startup
+    # time, and username is specified while launching the instance, we have nothing
+    # to do.
+    if args.target_cloud == 'aws':
+        with open('/etc/cloud/cloud.cfg') as f:
+            lines = f.readlines()
+        s = StringIO()
+        for l in lines:
+            match_groups = re.match(r'^\s+groups: \[(.+)\]\n$', l)
+            if match_groups:
+                groups = match_groups.group(1).replace(' ', '')
+            if not re.match(r'^ - mounts\n$', l):
+                s.write(l)
+        cfg = s.getvalue()
+        s.close()
+        cfg = re.sub('^preserve_hostname: false', 'preserve_hostname: false\n\nssh_deletekeys: true', cfg, flags=re.MULTILINE)
+        cfg = re.sub('^     name: ubuntu', '     name: scyllaadm', cfg, flags=re.MULTILINE)
+        with open('/etc/cloud/cloud.cfg', 'w') as f:
+            f.write(cfg)
+        # before deleting home directory, need to change current directory
+        os.chdir('/tmp')
+        run('userdel -r -f ubuntu', shell=True, check=True)
+        run('cloud-init clean', shell=True, check=True)
+        run('cloud-init init', shell=True, check=True)
+        for skel in glob.glob('/etc/skel/.*'):
+            shutil.copy(skel, '/home/scyllaadm')
+            os.chown(skel, 1000, 1000)
+        run(f'useradd -o -u 1000 -g scyllaadm -G {groups} -s /bin/bash -d /home/scyllaadm centos', shell=True, check=True)
+        run('groupadd -o -g 1000 centos', shell=True, check=True)
+        os.symlink('/home/scyllaadm', '/home/centos')
+        run(f'useradd -o -u 1000 -g scyllaadm -G {groups} -s /bin/bash -d /home/scyllaadm ubuntu', shell=True, check=True)
+        run('groupadd -o -g 1000 ubuntu', shell=True, check=True)
+        os.symlink('/home/scyllaadm', '/home/ubuntu')
+
+    if args.target_cloud == 'azure':
+        with open('/etc/hosts', 'a') as f:
+            f.write('\n\n169.254.169.254    metadata.azure.internal\n')
+
+    # generate package manifest to scylla-packages.txt
+    deps = run(f'apt-cache depends --recurse --no-recommends --no-suggests --no-conflicts --no-breaks --no-replaces --no-enhances --installed {args.product}', stdout=PIPE, stderr=STDOUT, shell=True, check=True, encoding='utf-8').stdout.splitlines()
+    pkgs=[]
+    for d in deps:
+        if re.match(r'^\w', d) and not re.match(r'.+:i386$', d) and d not in pkgs:
+            pkgs.append(d)
+    with open('{}/{}-packages-{}-{}.txt'.format(homedir, args.product, args.scylla_version, arch()), 'w') as f:
+        for pkg_name in pkgs:
+            pkg_name_version = run(f"dpkg-query --showformat='${{Package}}=${{Version}}' --show {pkg_name}", capture_output=True, shell=True, check=True, encoding='utf-8').stdout
+            f.write(f'{pkg_name_version}\n')

@@ -2,17 +2,7 @@
 #
 # Copyright 2020 ScyllaDB
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-License-Identifier: Apache-2.0
 
 . /etc/os-release
 
@@ -43,6 +33,12 @@ fi
 
 if [[ ! -f /etc/redhat-release ]]; then
     echo "Need Redhat like OS to build RPM"
+fi
+
+# Centos8 is EOL, need to change mirrors
+if [ "$VERSION" = "8" ] ; then
+  sed -i 's/mirrorlist/#mirrorlist/g' /etc/yum.repos.d/CentOS-Linux-* ;
+  sed -i 's|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' /etc/yum.repos.d/CentOS-Linux-* ;
 fi
 
 # On clean CentOS Docker sudo command is not installed
@@ -79,7 +75,7 @@ cd -
 echo "Building in $PWD..."
 
 VERSION=$(./SCYLLA-VERSION-GEN)
-SCYLLA_VERSION=$(cat build/SCYLLA-VERSION-FILE)
+SCYLLA_VERSION=$(sed 's/-/~/' build/SCYLLA-VERSION-FILE)
 SCYLLA_RELEASE=$(cat build/SCYLLA-RELEASE-FILE)
 PRODUCT=$(cat build/SCYLLA-PRODUCT-FILE)
 
@@ -88,7 +84,7 @@ PACKAGE_NAME="$PRODUCT-machine-image"
 RPMBUILD=$(readlink -f build/)
 mkdir -pv ${RPMBUILD}/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
 
-git archive --format=tar --prefix=$PACKAGE_NAME-$SCYLLA_VERSION/ HEAD -o $RPMBUILD/SOURCES/$PACKAGE_NAME-$VERSION.tar
+git archive --format=tar --prefix=$PACKAGE_NAME-$SCYLLA_VERSION/ HEAD -o $RPMBUILD/SOURCES/$PACKAGE_NAME-$SCYLLA_VERSION-$SCYLLA_RELEASE.tar
 cp dist/redhat/scylla-machine-image.spec $RPMBUILD/SPECS/$PACKAGE_NAME.spec
 
 parameters=(

@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     name: Unittest and Build RPMs
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
       - name: Setup python
         uses: actions/setup-python@v2
         with:
@@ -24,14 +24,20 @@ jobs:
 
         run: |
             pip install pyyaml==5.3
+            pip install httpretty
+            pip install psutil
+            pip install distro
             cd ./tests
             python -m unittest test_scylla_configure.py
+            python -m unittest test_aws_instance.py
+            python -m unittest test_gcp_instance.py
+            python -m unittest test_azure_instance.py
 
-      - name: Build Centos 7 RPM
+      - name: Build RPM (Centos:7)
         run: docker run -v `pwd`:/scylla-machine-image -w /scylla-machine-image  --rm centos:7.2.1511 bash -c './dist/redhat/build_rpm.sh -t centos7'
 
-      - name: Build Centos 8 RPM
-        run: docker run -v `pwd`:/scylla-machine-image -w /scylla-machine-image  --rm centos:8 bash -c './dist/redhat/build_rpm.sh -t centos8'
+      - name: Build RPM (Rockylinux:8)
+        run: docker run -v `pwd`:/scylla-machine-image -w /scylla-machine-image  --rm rockylinux:8 bash -c './dist/redhat/build_rpm.sh -t centos8'
 
-      - name: Build Ubuntu DEB
-        run: docker run -v `pwd`:/scylla-machine-image -w /scylla-machine-image  --rm fedora:33 bash -c './dist/debian/build_deb.sh'
+      - name: Build DEB (Ubuntu:20.04)
+        run: docker run -v `pwd`:/scylla-machine-image -w /scylla-machine-image  --rm ubuntu:20.04 bash -c 'apt update -y; apt install -y git ; git config --global --add safe.directory "*"; ./dist/debian/build_deb.sh'

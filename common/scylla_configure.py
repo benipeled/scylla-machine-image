@@ -2,17 +2,7 @@
 #
 # Copyright 2020 ScyllaDB
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-License-Identifier: Apache-2.0
 
 import base64
 import json
@@ -20,12 +10,11 @@ import subprocess
 import yaml
 import time
 import logging
-import sys
 from textwrap import dedent
 from datetime import datetime
 from lib.log import setup_logging
 from pathlib import Path
-
+from email import message_from_string
 
 LOGGER = logging.getLogger(__name__)
 
@@ -48,18 +37,17 @@ class ScyllaMachineImageConfigurator:
         'post_configuration_script': '',
         'post_configuration_script_timeout': 600,  # seconds
         'start_scylla_on_first_boot': True,
-        'data_device': 'auto'  # Supported options:
-                               #   instance_store - find all ephemeral devices (only for AWS)
-                               #   attached - find all attached devices and use them
-                               #   auto - automatically select devices using following strategy:
-                               #       GCE: select attached NVMe.
-                               #       AWS:
-                               #           if ephemeral found - use them
-                               #           else if attached EBS found use them
-                               #           else: fail create_devices
+        'data_device': 'auto',  # Supported options:
+                                #   instance_store - find all ephemeral devices (only for AWS)
+                                #   attached - find all attached devices and use them
+                                #   auto - automatically select devices using following strategy:
+                                #       GCE: select attached NVMe.
+                                #       AWS:
+                                #           if ephemeral found - use them
+                                #           else if attached EBS found use them
+                                #           else: fail create_devices
+        'raid_level': 0  # Default raid level is 0, supported raid 0, 5
     }
-
-    DISABLE_START_FILE_PATH = Path("/etc/scylla/ami_disabled")
 
     def __init__(self, scylla_yaml_path="/etc/scylla/scylla.yaml"):
         self.scylla_yaml_path = Path(scylla_yaml_path)
@@ -71,8 +59,7 @@ class ScyllaMachineImageConfigurator:
     @property
     def cloud_instance(self):
         if not self._cloud_instance:
-            sys.path.append('/opt/scylladb/scripts')
-            from scylla_util import get_cloud_instance
+            from lib.scylla_cloud import get_cloud_instance
             self._cloud_instance = get_cloud_instance()
         return self._cloud_instance
 
@@ -97,10 +84,24 @@ class ScyllaMachineImageConfigurator:
     def instance_user_data(self):
         if self._instance_user_data is None:
             try:
-                raw_user_data = self.cloud_instance.user_data
+                raw_user_data = self.cloud_instance.user_data.strip()
                 LOGGER.info("Got user-data: %s", raw_user_data)
-                self._instance_user_data = json.loads(raw_user_data) if raw_user_data.strip() else {}
-                LOGGER.debug("JSON parsed user-data: %s", self._instance_user_data)
+
+                # Try reading mime multipart message, and extract
+                # scylla-machine-image configuration out of it
+                message = message_from_string(raw_user_data)
+                if message.is_multipart():
+                    for part in message.walk():
+                        if part.get_content_type() in ('x-scylla/json', 'x-scylla/yaml'):
+                            # we'll pick here the last seen json or yaml file,
+                            # if multiple of them exists the last one wins, we are not merging them together
+                            raw_user_data = part.get_payload()
+
+                # try parse yaml, and fallback to parsing json
+                self._instance_user_data = {}
+                if raw_user_data:
+                    self._instance_user_data = yaml.safe_load(raw_user_data)
+                LOGGER.debug("parsed user-data: %s", self._instance_user_data)
             except Exception as e:
                 LOGGER.warning("Error getting user data: %s. Will use defaults!", e)
                 self._instance_user_data = {}
@@ -111,7 +112,7 @@ class ScyllaMachineImageConfigurator:
         self.CONF_DEFAULTS["scylla_yaml"]["listen_address"] = private_ip
         self.CONF_DEFAULTS["scylla_yaml"]["broadcast_rpc_address"] = private_ip
         self.CONF_DEFAULTS["scylla_yaml"]["seed_provider"][0]['parameters'][0]['seeds'] = private_ip
-        self.CONF_DEFAULTS["scylla_yaml"]["endpoint_snitch"] = self.cloud_instance.ENDPOINT_SNITCH
+        self.CONF_DEFAULTS["scylla_yaml"]["endpoint_snitch"] = self.cloud_instance.endpoint_snitch
 
     def configure_scylla_yaml(self):
         self.updated_ami_conf_defaults()
@@ -159,13 +160,15 @@ class ScyllaMachineImageConfigurator:
         default_start_scylla_on_first_boot = self.CONF_DEFAULTS["start_scylla_on_first_boot"]
         if not self.instance_user_data.get("start_scylla_on_first_boot", default_start_scylla_on_first_boot):
             LOGGER.info("Disabling Scylla start on first boot")
-            self.DISABLE_START_FILE_PATH.touch()
+            subprocess.run("/usr/bin/systemctl stop scylla-server.service", shell=True, check=True)
 
     def create_devices(self):
         device_type = self.instance_user_data.get("data_device", self.CONF_DEFAULTS['data_device'])
+        raid_level = self.instance_user_data.get("raid_level", self.CONF_DEFAULTS['raid_level'])
+        cmd_create_devices = f"/opt/scylladb/scylla-machine-image/scylla_create_devices --data-device {device_type} --raid-level {raid_level}"
         try:
             LOGGER.info(f"Create scylla data devices as {device_type}")
-            subprocess.run(f"/opt/scylladb/scylla-machine-image/scylla_create_devices --data-device {device_type}", shell=True, check=True)
+            subprocess.run(cmd_create_devices, shell=True, check=True)
         except Exception as e:
             LOGGER.error("Failed to create devices: %s", e)
 

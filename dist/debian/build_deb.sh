@@ -2,17 +2,7 @@
 #
 # Copyright 2021 ScyllaDB
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-License-Identifier: Apache-2.0
 
 . /etc/os-release
 
@@ -94,23 +84,18 @@ pkg_install python3-pip
 echo "Building in $PWD..."
 
 VERSION=$(./SCYLLA-VERSION-GEN)
-SCYLLA_VERSION=$(cat build/SCYLLA-VERSION-FILE)
+SCYLLA_VERSION=$(sed 's/-/~/' build/SCYLLA-VERSION-FILE)
 SCYLLA_RELEASE=$(cat build/SCYLLA-RELEASE-FILE)
 PRODUCT=$(cat build/SCYLLA-PRODUCT-FILE)
 BUILDDIR=build/debian
 PACKAGE_NAME="$PRODUCT-machine-image"
 
-if echo $SCYLLA_VERSION | grep rc >/dev/null ; then
- SCYLLA_VERSION=$(echo $SCYLLA_VERSION |sed 's/\(.*\)\.)*/\1~/')
- VERSION="$SCYLLA_VERSION-$SCYLLA_RELEASE"
-fi
-
 rm -rf "$BUILDDIR"
 mkdir -p "$BUILDDIR"/scylla-machine-image
 
-git archive --format=tar.gz HEAD -o "$BUILDDIR"/"$PACKAGE_NAME"_"$VERSION".orig.tar.gz
+git archive --format=tar.gz HEAD -o "$BUILDDIR"/"$PACKAGE_NAME"_"$SCYLLA_VERSION"-"$SCYLLA_RELEASE".orig.tar.gz
 cd "$BUILDDIR"/scylla-machine-image
-tar -C ./ -xpf ../"$PACKAGE_NAME"_"$VERSION".orig.tar.gz
+tar -C ./ -xpf ../"$PACKAGE_NAME"_"$SCYLLA_VERSION"-"$SCYLLA_RELEASE".orig.tar.gz
 cd -
 ./dist/debian/debian_files_gen.py
 cd "$BUILDDIR"/scylla-machine-image
