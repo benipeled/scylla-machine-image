@@ -93,6 +93,10 @@ class cloud_instance(metaclass=ABCMeta):
     def is_supported_instance_class(self):
         pass
 
+    @abstractmethod
+    def is_dev_instance_type(self):
+        pass
+
     @property
     @abstractmethod
     def instancetype(self):
@@ -318,6 +322,11 @@ class gcp_instance(cloud_instance):
     def is_recommended_instance_size(self):
         """if this instance has at least 2 cpus, it has a recommended size"""
         if int(self.instance_size()) > 1:
+            return True
+        return False
+
+    def is_dev_instance_type(self):
+        if self.instancetype in ['e2-micro', 'e2-small', 'e2-medium']:
             return True
         return False
 
@@ -602,6 +611,9 @@ class azure_instance(cloud_instance):
             return True
         return False
 
+    def is_dev_instance_type(self):
+        return False
+
     def private_ipv4(self):
         return self.__instance_metadata("/network/interface/0/ipv4/ipAddress/0/privateIpAddress")
 
@@ -744,6 +756,9 @@ class aws_instance(cloud_instance):
     def is_supported_instance_class(self):
         if self.instance_class() in ['i2', 'i3', 'i3en', 'c5d', 'm5d', 'm5ad', 'r5d', 'z1d', 'c6gd', 'm6gd', 'r6gd', 'x2gd', 'im4gn', 'is4gen', 'i4i', 'i4g']:
             return True
+        return False
+
+    def is_dev_instance_type(self):
         return False
 
     def get_en_interface_type(self):
