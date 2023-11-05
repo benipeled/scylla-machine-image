@@ -324,7 +324,7 @@ fi
 
 mkdir -p build
 
-export PACKER_LOG=1
+export PACKER_LOG=10
 export PACKER_LOG_PATH
 
 set -x
